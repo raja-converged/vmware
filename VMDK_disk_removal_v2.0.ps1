@@ -17,13 +17,10 @@
 		* Tested against VMware PowerCLI 6.5.1 build 5377412
 		* Tested against vCenter 6.0 / 5.5
 		* Tested against ESXi 5.5/6.0
-#
-
 For any modifications or suggestions please do contact Raja Pamuluri at raja.converged@gmail.com.
 
 #>
 
-###$outputof_script =
 Write-Host "This script will show the status of each hard disk and then remove the hard disk from the VM as given in the imported input CSV file " -ForegroundColor Yellow
 Write-Host "Kindly understand the implications of hard disk removeal at ESXi & VM layer before proceeding" -ForegroundColor Yellow 
 Write-Host "export the hard disk entries with the command Get-VM <VMNAME> | Get-Harddisk |select Name,Parent,Filename,Id|Export-Csv C:\Temp\harddisk.csv and filter the harddisks which one you want remove and save it"
