@@ -398,13 +398,6 @@ Get-Datastore -Name $ds |Get-VM |FT |Out-Host
 
 function XIO_unmap_remove () {
 
-
-################# User Agreement ###########
-<# You need to have both XIO & VMware PowerCLI modules are already installed on the host from where you are running this script.
-\\mdcnasshares\s_convergedteam\Automation\Powershell\Production\XtremIO.Utils-master
-For any modifications or suggestions please do contact Raja Pamuluri (rajasekhar.reddy@vistraenergy) or get the approval from Chris Cantu.
-#>
-
 Write-Host "Please enter the file path as input which has list of XIO Volume names and their NAA IDs in CSV file format <--- " -ForegroundColor Black -BackgroundColor Yellow -NoNewline
 $path = [String](read-host)
 $VolList= Import-CSV $path
@@ -412,19 +405,6 @@ Write-Host "Please enter the XIO management server name on which XIO clusters ar
 $XIOmgmtHost = [string] (Read-Host)
 Write-Host "Please enter the XIO cluster name on which XIO clusters are configured: ==> " -ForegroundColor Yellow -NoNewline
 $XIOcluster = [string] (Read-Host)
-
-<################## vCenter Details ###########
-
-$vCenter = Read-host "Enter vCenter Host FQDN on which we need to performt the reclaim: " 
-$vcuserName =Read-host "Enter Username: " 
-$SecurePassword = Read-Host -assecurestring "Please enter your password: " 
-$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
-$vcPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-Write-Host "Please enter the ESXI cluster name to which these volumes are mapped to: " -ForegroundColor Black -BackgroundColor Yellow -NoNewline
-$ESXicluster = [string] (Read-Host)
-################# vCenter Details ###########
-#>
-
 
 write-host "Connecting to XMS server through PowerCLI: " -foregroundcolor Yellow
 Connect-XIOServer $XIOmgmtHost
@@ -439,15 +419,14 @@ Get-XIOLunMap -Volume $volname.Name |Out-Host
 }
 function removemapping_xiovol () {
 Foreach ($volname in $VolList) {
-#Get-XIOLunMap -Volume $volname.Name |Remove-XIOLunMap -WhatIf
-#Get-XIOLunMap -Volume $volname.Name |Remove-XIOLunMap -WhatIf
+
 Get-XIOLunMap -Volume $volname.Name |Remove-XIOLunMap -Confirm:$false -Verbose
 }
 }
 
 function delete_xiovol () {
 Foreach ($volname in $VolList) {
-#Remove-XIOVolume -Volume "$volname.Name" -WhatIf
+
 Get-XIOVolume $volname.Name | Remove-XIOVolume -Confirm:$false -Verbose
 }
 }
