@@ -1,0 +1,453 @@
+﻿
+################# User Agreement ###########
+<# 
+
+Author and customized by: Raja
+
+<#	
+	===========================================================================
+	Created by: 	Raja Pamuluri
+	Created on:		12/2017
+    Version: v5.0
+    Github Link: https://github.com/raja-converged/vmware
+		===========================================================================
+	.DESCRIPTION
+		PowerShell Module to help with datastore reclaim at vCenter level that includes pre-check,unmount,detach, validate and clear dead paths at ESXi level.
+	.NOTES
+		Make sure you understand the impact of Datastore reclaim and follow the process at your organization level. Alsot, you can modify or customize as you need.
+		* Tested against PowerShell 5.0 
+		* Tested against VMware PowerCLI 6.5.1 build 5377412
+		* Tested against vCenter 6.0 / 5.5
+		* Tested against ESXi 5.5/6.0
+#
+
+You import or this script will has built in with the below two modules  since these two won't come by default with VMware Powershell plugin.
+DatastoreFunctions.ps1 is the script which we have taken from VMware and customized to perform the unmount , detach opertations.
+get-datastoreunmountstatus.ps1 is the script which we have taken from Vmware community and it will perform the pre-check tasks.
+
+For any modifications or suggestions please do contact Raja Pamuluri at raja.converged@gmail.com.
+#>
+
+Write-Host "Before running executing this script make sure you have imported the required modules like datastore functions,get-datastoreunmount status:" -ForegroundColor Yellow
+Write-Host "This script will provide the current status of datastores which are given in the input file and then unmount, detach one by one followed-by rescan " -ForegroundColor Yellow
+Write-Host "Kindly understand the implications of datastore unmount and detach at ESXi layer before proceeding" -ForegroundColor Yellow 
+do {
+        Write-Host "Enter Yes to proceed No to quit. Are you ready to proceed (Yes/No): " -NoNewline -ForegroundColor Yellow
+        $userAcceptance = read-host 
+} Until (($userAcceptance -eq "Yes") -or ($userAcceptance -eq "No") )
+
+if ( $userAcceptance  -eq "No" ){ 
+        Write-host "Exiting" -ForegroundColor Red
+        exit
+}else{
+
+        Write-Host "Please enter the ServiceNow change ID submitted for this activity: " -ForegroundColor Yellow -NoNewline
+        $ChangeID = read-host
+}
+
+################# vCenter Details ###########
+
+$vCenter = Read-host "Enter vCenter Host FQDN on which we need to performt the reclaim: "
+$vcuserName =Read-host "Enter Username: " 
+$SecurePassword = Read-Host -assecurestring "Please enter your password: " 
+$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
+$vcPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+Write-Host "Please enter the ESXi Cluster Name for this activity: " -ForegroundColor Yellow -NoNewline
+$ESXiClusterName = [string] (read-host)
+
+
+############## Functions ###################
+
+function Get-DatastoreUnmountStatus{
+  <#
+.SYNOPSIS  Check if a datastore can be unmounted.
+.DESCRIPTION The function checks a number of prerequisites
+  that need to be met to be able to unmount a datastore.
+.PARAMETER Datastore
+  The datastore for which you want to check the conditions.
+  You can pass the name of the datastore or the Datastore
+  object returned by Get-Datastore
+.EXAMPLE
+  PS> Get-DatastoreUnmountStatus -Datastore DS1
+.EXAMPLE
+  PS> Get-Datastore | Get-DatastoreUnmountStatus
+#>
+  param(
+    [CmdletBinding()]
+    [Parameter(Mandatory=$true,ValueFromPipeline=$true)]
+    [PSObject[]]$Datastore
+  )
+ 
+  process{
+    foreach($ds in $Datastore){
+      if($ds.GetType().Name -eq "string"){
+        $ds = Get-Datastore -Name $ds
+      }
+      $parent = Get-View $ds.ExtensionData.Parent
+      New-Object PSObject -Property @{
+        Datastore = $ds.Name
+        # No Virtual machines
+        NoVM = $ds.ExtensionData.VM.Count -eq 0
+        # Not in a Datastore Cluster
+        NoDastoreClusterMember = $parent -isnot [VMware.Vim.StoragePod]
+        # Not managed by sDRS
+        NosDRS = &{
+          if($parent -is [VMware.Vim.StoragePod]){
+            !$parent.PodStorageDrsEntry.StorageDrsConfig.PodConfig.Enabled
+          }
+          else {$true}
+        }
+        # SIOC disabled
+        NoSIOC = !$ds.StorageIOControlEnabled
+        # No HA heartbeat
+        NoHAheartbeat = &{
+          $hbDatastores = @()
+          $cls = Get-View -ViewType ClusterComputeResource -Property Host |
+          where{$_.Host -contains $ds.ExtensionData.Host[0].Key}
+          if($cls){
+            $cls | %{
+              (                $_.RetrieveDasAdvancedRuntimeInfo()).HeartbeatDatastoreInfo | %{
+                $hbDatastores += $_.Datastore
+              }
+            }
+            $hbDatastores -notcontains $ds.ExtensionData.MoRef
+          }
+          else{$true}
+        }
+        # No vdSW file
+        NovdSwFile = &{
+          New-PSDrive -Location $ds -Name ds -PSProvider VimDatastore -Root '\' | Out-Null
+          $result = Get-ChildItem -Path ds:\ -Recurse |
+          where {$_.Name -match '.dvsData'}
+          Remove-PSDrive -Name ds -Confirm:$false
+          if($result){$false}else{$true}
+        }
+        # No scratch partition
+        NoScratchPartition = &{
+          $result = $true
+          $ds.ExtensionData.Host | %{Get-View $_.Key} | %{
+            $diagSys = Get-View $_.ConfigManager.DiagnosticSystem
+            $dsDisks = $ds.ExtensionData.Info.Vmfs.Extent | %{$_.DiskName}
+            if($dsDisks -contains $diagSys.ActivePartition.Id.DiskName){
+              $result = $false
+            }
+          }
+          $result
+        }
+      }
+    }
+  }
+}
+
+
+Function Get-DatastoreMountInfo {
+	<#	.Description
+		Get Datastore mount info (like, is datastore mounted on given host, is SCSI LUN attached, so on)
+	#>
+	[CmdletBinding()]
+	Param (
+		## one or more datastore objects for which to get Mount info
+		[Parameter(Mandatory=$true,ValueFromPipeline=$true)][VMware.VimAutomation.ViCore.Impl.V1.DatastoreManagement.VmfsDatastoreImpl[]]$Datastore
+	)
+	Begin {$arrHostsystemViewPropertiesToGet = "Name","ConfigManager.StorageSystem"; $arrStorageSystemViewPropertiesToGet = "SystemFile","StorageDeviceInfo.ScsiLun"}
+	Process {
+		foreach ($dstThisOne in $Datastore) {
+			## if this is a VMFS datastore
+			if ($dstThisOne.ExtensionData.info.Vmfs) {
+				## get the canonical names for all of the extents that comprise this datastore
+				$arrDStoreExtentCanonicalNames = $dstThisOne.ExtensionData.Info.Vmfs.Extent | Foreach-Object {$_.DiskName}
+				## if there are any hosts associated with this datastore (though, there always should be)
+				if ($dstThisOne.ExtensionData.Host) {
+					foreach ($oDatastoreHostMount in $dstThisOne.ExtensionData.Host) {
+						## get the HostSystem and StorageSystem Views
+						$viewThisHost = Get-View $oDatastoreHostMount.Key -Property $arrHostsystemViewPropertiesToGet
+						$viewStorageSys = Get-View $viewThisHost.ConfigManager.StorageSystem -Property $arrStorageSystemViewPropertiesToGet
+						foreach ($oScsiLun in $viewStorageSys.StorageDeviceInfo.ScsiLun) {
+							## if this SCSI LUN is part of the storage that makes up this datastore (if its canonical name is in the array of extent canonical names)
+							if ($arrDStoreExtentCanonicalNames -contains $oScsiLun.canonicalName) {
+								New-Object -Type PSObject -Property @{
+									Datastore = $dstThisOne.Name
+									ExtentCanonicalName = $oScsiLun.canonicalName
+									VMHost = $viewThisHost.Name
+									Mounted = $oDatastoreHostMount.MountInfo.Mounted
+									ScsiLunState = Switch ($oScsiLun.operationalState[0]) {
+												"ok" {"Attached"; break}
+												"off" {"Detached"; break}
+												default {$oScsiLun.operationalstate[0]}
+											} ## end switch
+								} ## end new-object
+							} ## end if
+						} ## end foreach
+					} ## end foreach
+				} ## end if
+			} ## end if
+		} ## end foreach
+	} ## end proces
+} ## end fn
+
+
+Function Unmount-Datastore {
+	<#	.Description
+		Unmount VMFS volume(s) from VMHost(s)
+		.Example
+		Get-Datastore myOldDatastore0 | Unmount-Datastore -VMHost (Get-VMHost myhost0.dom.com, myhost1.dom.com)
+		Unmounts the VMFS volume myOldDatastore0 from specified VMHosts
+		Get-Datastore myOldDatastore1 | Unmount-Datastore
+		Unmounts the VMFS volume myOldDatastore1 from all VMHosts associated with the datastore
+		.Outputs
+		None
+	#>
+	[CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact="High")]
+	Param (
+		## One or more datastore objects to whose VMFS volumes to unmount
+		[Parameter(Mandatory=$true,ValueFromPipeline=$true)][VMware.VimAutomation.ViCore.Impl.V1.DatastoreManagement.VmfsDatastoreImpl[]]$Datastore,
+		## VMHost(s) on which to unmount a VMFS volume; if non specified, will unmount the volume on all VMHosts that have it mounted
+		[Parameter(ParameterSetName="SelectedVMHosts")][VMware.VimAutomation.ViCore.Impl.V1.Inventory.VMHostImpl[]]$VMHost
+	)
+	Begin {$arrHostsystemViewPropertiesToGet = "Name","ConfigManager.StorageSystem"; $arrStorageSystemViewPropertiesToGet = "SystemFile"}
+	Process {
+		## for each of the datastores
+		foreach ($dstThisOne in $Datastore) {
+			## if the datastore is actually mounted on any host
+			if ($dstThisOne.ExtensionData.Host) {
+				## the MoRefs of the HostSystems upon which to act
+				$arrMoRefsOfHostSystemsForUnmount = if ($PSCmdlet.ParameterSetName -eq "SelectedVMHosts") {$VMHost | Foreach-Object {$_.Id}} else {$dstThisOne.ExtensionData.Host | Foreach-Object {$_.Key}}
+				## get array of HostSystem Views from which to unmount datastore
+				$arrViewsOfHostSystemsForUnmount = Get-View -Property $arrHostsystemViewPropertiesToGet -Id $arrMoRefsOfHostSystemsForUnmount
+
+				foreach ($viewThisHost in $arrViewsOfHostSystemsForUnmount) {
+					## actually do the unmount (if not WhatIf)
+					if ($PSCmdlet.ShouldProcess("VMHost '$($viewThisHost.Name)'", "Unmounting VMFS datastore '$($dstThisOne.Name)'")) {
+						$viewStorageSysThisHost = Get-View $viewThisHost.ConfigManager.StorageSystem -Property $arrStorageSystemViewPropertiesToGet
+						## add try/catch here?  and, return something here?
+						$viewStorageSysThisHost.UnmountVmfsVolume($dstThisOne.ExtensionData.Info.vmfs.uuid)
+					} ## end if
+				} ## end foreach
+			} ## end if
+		} ## end foreach
+	} ## end process
+} ## end fn
+
+
+Function Mount-Datastore {
+	<#	.Description
+		Mount VMFS volume(s) on VMHost(s)
+		.Example
+		Get-Datastore myOldDatastore1 | Mount-Datastore
+		Mounts the VMFS volume myOldDatastore1 on all VMHosts associated with the datastore (where it is not already mounted)
+		.Outputs
+		None
+	#>
+	[CmdletBinding(SupportsShouldProcess=$true)]
+	Param (
+		[Parameter(Mandatory=$true,ValueFromPipeline=$true)][VMware.VimAutomation.ViCore.Impl.V1.DatastoreManagement.VmfsDatastoreImpl[]]$Datastore
+	)
+	Begin {$arrHostsystemViewPropertiesToGet = "Name","ConfigManager.StorageSystem"; $arrStorageSystemViewPropertiesToGet = "SystemFile"}
+	Process {
+		foreach ($dstThisOne in $Datastore) {
+			## if there are any hosts associated with this datastore (though, there always should be)
+			if ($dstThisOne.ExtensionData.Host) {
+				foreach ($oDatastoreHostMount in $dstThisOne.ExtensionData.Host) {
+					$viewThisHost = Get-View $oDatastoreHostMount.Key -Property $arrHostsystemViewPropertiesToGet
+					if (-not $oDatastoreHostMount.MountInfo.Mounted) {
+						if ($PSCmdlet.ShouldProcess("VMHost '$($viewThisHost.Name)'", "Mounting VMFS Datastore '$($dstThisOne.Name)'")) {
+							$viewStorageSysThisHost = Get-View $viewThisHost.ConfigManager.StorageSystem -Property $arrStorageSystemViewPropertiesToGet
+							$viewStorageSysThisHost.MountVmfsVolume($dstThisOne.ExtensionData.Info.vmfs.uuid);
+						} ## end if
+					} ## end if
+					else {Write-Verbose -Verbose "Datastore '$($dstThisOne.Name)' already mounted on VMHost '$($viewThisHost.Name)'"}
+				} ## end foreach
+			} ## end if
+		} ## end foreach
+	} ## end process
+} ## end fn
+
+
+Function Detach-SCSILun {
+	<#	.Description
+		Detach SCSI LUN(s) from VMHost(s).  If specifying host, needs to be a VMHost object (as returned from Get-VMHost).  This was done to avoid any "matched host with similar name pattern" problems that may occur if accepting host-by-name.
+		.Example
+		Get-Datastore myOldDatastore0 | Detach-SCSILun -VMHost (Get-VMHost myhost0.dom.com, myhost1.dom.com)
+		Detaches the SCSI LUN associated with datastore myOldDatastore0 from specified VMHosts
+		Get-Datastore myOldDatastore1 | Detach-SCSILun
+		Detaches the SCSI LUN associated with datastore myOldDatastore1 from all VMHosts associated with the datastore
+		.Outputs
+		None
+	#>
+	[CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact="High")]
+	Param (
+		## One or more datastore objects to whose SCSI LUN to detach
+		[Parameter(Mandatory=$true,ValueFromPipeline=$true)][VMware.VimAutomation.ViCore.Impl.V1.DatastoreManagement.VmfsDatastoreImpl[]]$Datastore,
+		## VMHost(s) on which to detach the SCSI LUN; if non specified, will detach the SCSI LUN on all VMHosts that have it attached
+		[Parameter(ParameterSetName="SelectedVMHosts")][VMware.VimAutomation.ViCore.Impl.V1.Inventory.VMHostImpl[]]$VMHost
+	)
+	Begin {$arrHostsystemViewPropertiesToGet = "Name","ConfigManager.StorageSystem"; $arrStorageSystemViewPropertiesToGet = "SystemFile","StorageDeviceInfo.ScsiLun"}
+	Process {
+		foreach ($dstThisOne in $Datastore) {
+			## get the canonical names for all of the extents that comprise this datastore
+			$arrDStoreExtentCanonicalNames = $dstThisOne.ExtensionData.Info.Vmfs.Extent | Foreach-Object {$_.DiskName}
+			## if there are any hosts associated with this datastore (though, there always should be)
+			if ($dstThisOne.ExtensionData.Host) {
+				## the MoRefs of the HostSystems upon which to act
+				$arrMoRefsOfHostSystemsForUnmount = if ($PSCmdlet.ParameterSetName -eq "SelectedVMHosts") {$VMHost | Foreach-Object {$_.Id}} else {$dstThisOne.ExtensionData.Host | Foreach-Object {$_.Key}}
+				## get array of HostSystem Views from which to unmount datastore
+				$arrViewsOfHostSystemsForUnmount = Get-View -Property $arrHostsystemViewPropertiesToGet -Id $arrMoRefsOfHostSystemsForUnmount
+
+				foreach ($viewThisHost in $arrViewsOfHostSystemsForUnmount) {
+					## get the StorageSystem View
+					$viewStorageSysThisHost = Get-View $viewThisHost.ConfigManager.StorageSystem -Property $arrStorageSystemViewPropertiesToGet
+					foreach ($oScsiLun in $viewStorageSysThisHost.StorageDeviceInfo.ScsiLun) {
+						## if this SCSI LUN is part of the storage that makes up this datastore (if its canonical name is in the array of extent canonical names)
+						if ($arrDStoreExtentCanonicalNames -contains $oScsiLun.canonicalName) {
+							if ($PSCmdlet.ShouldProcess("VMHost '$($viewThisHost.Name)'", "Detach LUN '$($oScsiLun.CanonicalName)'")) {
+								$viewStorageSysThisHost.DetachScsiLun($oScsiLun.Uuid)
+							} ## end if
+						} ## end if
+					} ## end foreach
+				} ## end foreach
+			} ## end if
+		} ## end foreach
+	} ## end process
+} ## end fn
+
+
+Function Attach-SCSILun {
+	<#	.Description
+		Attach SCSI LUN(s) to VMHost(s)
+		.Example
+		Get-Datastore myOldDatastore1 | Attach-SCSILun
+		Attaches the SCSI LUN associated with datastore myOldDatastore1 to all VMHosts associated with the datastore
+		.Outputs
+		None
+	#>
+	[CmdletBinding(SupportsShouldProcess=$true)]
+	Param (
+		## One or more datastore objects to whose SCSI LUN to attach
+		[Parameter(Mandatory=$true,ValueFromPipeline=$true)][VMware.VimAutomation.ViCore.Impl.V1.DatastoreManagement.VmfsDatastoreImpl[]]$Datastore
+	)
+	Begin {$arrHostsystemViewPropertiesToGet = "Name","ConfigManager.StorageSystem"; $arrStorageSystemViewPropertiesToGet = "SystemFile","StorageDeviceInfo.ScsiLun"}
+	Process {
+		foreach ($dstThisOne in $Datastore) {
+			$arrDStoreExtentCanonicalNames = $dstThisOne.ExtensionData.Info.Vmfs.Extent | Foreach-Object {$_.DiskName}
+			## if there are any hosts associated with this datastore (though, there always should be)
+			if ($dstThisOne.ExtensionData.Host) {
+				foreach ($oDatastoreHostMount in $dstThisOne.ExtensionData.Host) {
+					## get the HostSystem and StorageSystem Views
+					$viewThisHost = Get-View $oDatastoreHostMount.Key -Property $arrHostsystemViewPropertiesToGet
+					$viewStorageSysThisHost = Get-View $viewThisHost.ConfigManager.StorageSystem -Property $arrStorageSystemViewPropertiesToGet
+					foreach ($oScsiLun in $viewStorageSysThisHost.StorageDeviceInfo.ScsiLun) {
+						## if this SCSI LUN is part of the storage that makes up this datastore (if its canonical name is in the array of extent canonical names)
+						if ($arrDStoreExtentCanonicalNames -contains $oScsiLun.canonicalName) {
+							## if this SCSI LUN is not already attached
+							if (-not ($oScsiLun.operationalState[0] -eq "ok")) {
+								if ($PSCmdlet.ShouldProcess("VMHost '$($viewThisHost.Name)'", "Attach LUN '$($oScsiLun.CanonicalName)'")) {
+									$viewStorageSysThisHost.AttachScsiLun($oScsiLun.Uuid)
+								} ## end if
+							} ## end if
+							else {Write-Verbose -Verbose "SCSI LUN '$($oScsiLun.canonicalName)' already attached on VMHost '$($viewThisHost.Name)'"}
+						} ## end if
+					} ## end foreach
+				} ## end foreach
+			} ## end if
+		} ## end foreach
+	} ## end process
+} ## end fn
+
+
+
+function unmout_datastore (){
+Foreach ($ds in $DSPath) {
+#
+#Write-Host "Now we are going to unmount the $DSList from all the hosts as shown above"
+get-datastore -name $ds|Unmount-Datastore -Confirm:$false -Verbose
+}
+Write-Host "wait for 30 sec before moving to detaching of datastore" -ForegroundColor Green
+Start-Sleep -Seconds 30
+}
+
+function detach_datastore (){
+Foreach ($ds in $DSPath) {
+#
+#Things you can change as input variable for every object execution.
+Write-Host "This script will detach the Datastore $ds as mentioned in input file"  -ForegroundColor Green
+#Write-Host "Now we are going to unmount the $DSList from all the hosts as shown above"
+get-datastore -name $ds|Detach-SCSILun -Confirm:$false -Verbose
+Start-Sleep -Seconds 10
+Write-Host "Here is the  status of $ds Datastore after detach"  -ForegroundColor Green
+get-datastore -name $ds |Get-DatastoreMountInfo |sort Datastore,VMHost| FT -AutoSize
+}
+Write-Host "Now running vmfs & HBAs rescan on all hosts of cluster $ESXiClusterName"  -ForegroundColor Green
+get-cluster -Name $ESXiClusterName |Get-VMHost |Get-VMHostStorage -RescanAllHba -RescanVmfs
+}
+
+function precheck_datastore (){
+Foreach ($ds in $DSPath) {
+Write-Host "This function will perform all pre-checks on datastore $ds and all values should be True before we proceed with unmount & detach..it takes couple of minutes"  -ForegroundColor Green
+Get-Datastore -Name $ds |Get-DatastoreUnmountStatus |Out-Host
+Get-Datastore -Name $ds |Get-VM |FT |Out-Host
+}
+}
+
+####  Connect to vcenter ########
+Write-host "Checking loading VMWare PS Snapin ( It might take a minute or two) " -ForegroundColor Yellow
+if ( (Get-PSSnapin -Name VMware.VimAutomation.Core -ErrorAction SilentlyContinue) -eq $null ) { Add-PsSnapin VMware.VimAutomation.Core }
+
+$VCStatus = Connect-VIServer $vCenter -username $vcuserName  -password $vcPassword
+if ( $VCStatus ) {
+     
+        Write-Host "Please enter the file path as input which has list of datastore names for reclaim <--- " -ForegroundColor Yellow -NoNewline
+        $DSList = [String](read-host)
+        $DSPath = Get-Content $DSList
+        Write-Host "Here is the curretn status of targetted datastores mount info"  -ForegroundColor Green
+        Foreach ($ds in $DSPath) {
+          get-datastore -name $ds |Get-DatastoreMountInfo |sort Datastore, VMHost |FT -AutoSize
+          }
+
+          #### Checking if any active VMDK and VMs using on each datastore ####
+
+        do {
+                 precheck_datastore
+                 Write-Host "Are you sure you want to proceed with next step i.e unmount & detach (Yes/No): " -ForegroundColor Yellow -NoNewline
+                 $UserConfirmation = Read-Host
+         } Until ( ($UserConfirmation -eq "Yes") -or ($UserConfirmation -eq "No"))
+
+        if ( $UserConfirmation -eq "No" ){
+                Write-host "Exiting" -ForegroundColor Red
+                exit
+        }
+        
+      
+          #### User Confirmation before unmounting datastores ####
+                   
+        do {
+                 Write-Host "Are you sure you want to unmount the above mentioned datastores (Yes/No): " -ForegroundColor Yellow -NoNewline
+                 $UserConfirmation = Read-Host
+         } Until ( ($UserConfirmation -eq "Yes") -or ($UserConfirmation -eq "No"))
+
+        if ( $UserConfirmation -eq "No" ){
+                Write-host "Exiting" -ForegroundColor Red
+                exit
+        }
+        
+        Write-Host "Now Datastores will be unmounted from all hosts"  -ForegroundColor Green
+        unmout_datastore
+
+         #### User Confirmation before detaching datastores ####
+
+        do {
+                 Write-Host "Are you sure you want to detach the above mentioned datastores Now (Yes/No): " -ForegroundColor Yellow -NoNewline
+                 $UserConfirmation = Read-Host
+         } Until ( ($UserConfirmation -eq "Yes") -or ($UserConfirmation -eq "No"))
+
+        if ( $UserConfirmation -eq "No" ){
+                Write-host "Exiting" -ForegroundColor Red
+                exit
+        }
+        
+        Write-Host "Now Datastores will be detached from all hosts"  -ForegroundColor Yellow
+        detach_datastore
+         Write-Host "Disconnecting the vCenter"  -ForegroundColor Yellow
+        Disconnect-VIServer $vCenter -Confirm:$false
+               }
+        else {
+        }
