@@ -7,7 +7,7 @@ cls
 # In order to add additional tasks, add in additional write-host
 # lines and then create a function to allow the option to be run
 #
-Write-host "This script will help you to identify the vCenter name, ESXi cluster name & VMHost name for the given VM which is hosting in TCEH domain vCenters:" -ForegroundColor Green
+Write-host "This script will help you to identify the vCenter name, ESXi cluster name & VMHost name for the given VM which is hosting in ABC domain vCenters:" -ForegroundColor Green
 Write-host ""
 Write-Host "##############################################################################" -ForegroundColor Cyan
 $vcuserName =Read-host "Enter Username (<DOMAINNAME>\<UserName>) to connect all vCenter servers in ABC domain:"
