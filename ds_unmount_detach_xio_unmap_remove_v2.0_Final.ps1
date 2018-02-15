@@ -197,7 +197,7 @@ Function Get-DatastoreMountInfo {
 
 
 Function Unmount-Datastore {
-	<#	.Description
+	<#.Description
 		Unmount VMFS volume(s) from VMHost(s)
 		.Example
 		Get-Datastore myOldDatastore0 | Unmount-Datastore -VMHost (Get-VMHost myhost0.dom.com, myhost1.dom.com)
