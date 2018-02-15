@@ -11,12 +11,12 @@ Author and customized by: Raja
     Github Link: https://github.com/raja-converged/vmware
 		===========================================================================
 	.DESCRIPTION
-		PowerShell Module to help to automate the end to end storage allocation activity if you have VMware as hypervisor and XIO storage as SAN system.
+		PowerShell Module to help to automate the end to eganization and you can modify or customize the script as you need.
+		* Tested against PowerShell 5.0 nd storage allocation activity if you have VMware as hypervisor and XIO storage as SAN system.
 This script in first part, will perform the XIO volume creation at XIO storage array level that includes capacity pre-check, volume creation, mapping to given initiator grups and then validate.
 In the second part, it will perform the datastore creation & validation steps at vSphere cluster level and the datastore name will be same as volume name at XIO level.
 	.NOTES
-		Make sure you understand the impact of creating new volume with higher capacity at XIO level volume and creating the same as datastore at vSphere level. At the same time make sure you follow the process as per your organization and you can modify or customize the script as you need.
-		* Tested against PowerShell 5.0 
+		Make sure you understand the impact of creating new volume with higher capacity at XIO level volume and creating the same as datastore at vSphere level. At the same time make sure you follow the process as per your or
 		* Tested against VMware PowerCLI 6.5.1 build 5377412
 		* Tested against vCenter 6.0 / 5.5
 		* Tested against ESXi 5.5/6.0
@@ -24,7 +24,7 @@ In the second part, it will perform the datastore creation & validation steps at
         * Tested against XIO Powershell Module XtremIO.Utils v1.4.0 and you can download this from below GitHub link
           https://github.com/mtboren/XtremIO.Utils/tree/master/XtremIO.Utils
 
-For any modifications or suggestions please do contact Raja Pamuluri at rajasekhar.reddy@vistraenergy.com.
+For any modifications or suggestions please do contact Raja Pamuluri at raja.converged@gmail.com
 
 #>
 Write-Host "This script will allow you to create new XIO volume,map to initiator groups, validate, create datastore of the same volume at ESXi level and then rescan at cluster level " -ForegroundColor Yellow
