@@ -4,7 +4,6 @@ Author and customized by: Raja
 	Created by: 	Raja Pamuluri
 	Created on:		03/2018
     Version: v2.0
-    Gitlab Link: https://gitlab.tceh.net/
     Github Link: https://github.com/raja-converged/vmware
 	===========================================================================
 
