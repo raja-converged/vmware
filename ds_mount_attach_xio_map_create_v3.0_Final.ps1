@@ -57,7 +57,7 @@ Write-Host "Please enter the XIO management server name on which XIO clusters ar
 $XIOmgmtHost = [string] (Read-Host)
 Write-Host "Please enter the XIO cluster name on which we need to create new XIO volume: ==> " -ForegroundColor Yellow -NoNewline
 $XIOcluster = [string] (Read-Host)
-Write-Host "Please enter the user name to accese the XIO system i.e admin or tceh\<your ADM ID> which has admin permissions : ==> " -ForegroundColor Yellow -NoNewline
+Write-Host "Please enter the user name to accese the XIO system i.e admin or DOMAIN\YOURID which has admin permissions : ==> " -ForegroundColor Yellow -NoNewline
 $XIOUsername = [string] (Read-Host)
 Write-Host "Please enter the Name for new XIO volume which we will be creating and then map to ESXi cluster. Note that the same Name we will use as datastore Name at ESXi level <--- " -ForegroundColor Yellow -NoNewline
 $XIOVolumeName = [string] (Read-Host)
